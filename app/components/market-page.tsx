@@ -4,6 +4,9 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MarketDef } from "@/lib/markets";
 import type { MarketSnapshot, PairAnalysis } from "@/lib/types";
+import { AutoChart } from "./auto-chart";
+import { ChartUpload } from "./chart-upload";
+import { MtfPanel } from "./mtf-panel";
 import { PairCard, fmt } from "./pair-card";
 
 const SNAPSHOT_REFRESH_MS = 30_000;
@@ -162,6 +165,27 @@ export function MarketView({ market }: { market: MarketDef }) {
           <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/60">
             <TradingViewChart key={chartKey} symbol={market.tvSymbol} />
           </div>
+        </section>
+
+        <section className="mb-8">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+            Trade by timeframe — 1m · 5m · 15m · 1h · 4h
+          </h2>
+          <MtfPanel asset={market.id} short={market.short} />
+        </section>
+
+        <section className="mb-8">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+            Auto-drawn chart — the bot marks its own levels
+          </h2>
+          <AutoChart asset={market.id} />
+        </section>
+
+        <section className="mb-8">
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-zinc-400">
+            Upload a chart — AI screenshot analysis
+          </h2>
+          <ChartUpload />
         </section>
 
         <section className="mb-8">

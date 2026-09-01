@@ -4,8 +4,12 @@ import { detectCandles } from "../lib/candles";
 import { detectCrt } from "../lib/crt";
 import { analyze } from "../lib/signals";
 import { findFvgs, recentSweep } from "../lib/smc";
+import { drawBoxes, drawLines, drawTrendlines, projectFlow } from "../lib/levels";
+import { readFlow } from "../lib/mtf";
+import { toGeminiSchema } from "../lib/vision/gemini";
+import { SCHEMA, normalizeAnalysis, parseJsonReply } from "../lib/vision/prompt";
 import { currentBias, findSwings, structureEvents } from "../lib/structure";
-import type { Candle } from "../lib/types";
+import type { Candle, Tf, TfAnalysis } from "../lib/types";
 
 let pass = 0;
 let fail = 0;
@@ -162,6 +166,143 @@ check("no crashes / bad levels", errors === 0);
 const rate = nSignals / Math.max(nChecked, 1);
 check("signals fire but are selective (0.5%–15% of windows)", rate >= 0.005 && rate <= 0.15);
 check("both BUY and SELL occur", (directions.has("BUY") && directions.has("SELL")) || nSignals < 4);
+
+
+// ---------------------------------------------------------------- flow + drawings
+console.log("== Multi-timeframe flow read");
+{
+  const mk = (tf: Tf, bias: "bull" | "bear", strength: "strong" | "weak"): TfAnalysis => ({
+    tf, biasTf: "x", bias, biasStrength: strength,
+    score: 0, minScore: 7.5, reasons: [], signal: null,
+  });
+
+  const allBull = readFlow([
+    mk("1m", "bull", "strong"), mk("5m", "bull", "strong"), mk("15m", "bull", "strong"),
+    mk("1h", "bull", "strong"), mk("4h", "bull", "strong"),
+  ]);
+  check("aligned bull ladder -> strong up-flow", allBull.direction === "bull" && allBull.label === "strong up-flow");
+
+  // Fast timeframes must not carry a "strong" call while both heavies disagree.
+  const noisyLtf = readFlow([
+    mk("1m", "bull", "strong"), mk("5m", "bull", "strong"), mk("15m", "bull", "strong"),
+    mk("1h", "bear", "strong"), mk("4h", "bear", "strong"),
+  ]);
+  check("1h/4h against fast TFs -> not a strong call", noisyLtf.label !== "strong up-flow");
+
+  const split = readFlow([
+    mk("1m", "bull", "strong"), mk("5m", "bear", "strong"), mk("15m", "bull", "strong"),
+    mk("1h", "bear", "strong"), mk("4h", "bull", "weak"),
+  ]);
+  check("split ladder -> mixed", split.direction === "mixed");
+
+  check("no data -> mixed, zero agreement", readFlow([]).agreement === 0);
+
+  // Errored timeframes are excluded, not counted toward agreement.
+  const withError = readFlow([
+    { ...mk("1m", "bull", "strong"), error: "no data" },
+    mk("1h", "bear", "strong"), mk("4h", "bear", "strong"),
+  ]);
+  check("errored TF ignored in flow", withError.direction === "bear");
+}
+
+console.log("== Chart drawings");
+{
+  const cs = synth(600, 250);
+  const swings = findSwings(cs, 2);
+  const lines = drawLines(cs, swings);
+  const boxes = drawBoxes(cs, swings);
+  const tls = drawTrendlines(cs, swings);
+
+  check("levels drawn", lines.length > 0);
+  check("levels are finite numbers", lines.every((l) => Number.isFinite(l.price)));
+  check("levels sorted high -> low", lines.every((l, i) => i === 0 || lines[i - 1].price >= l.price));
+  check("boxes have top >= bottom", boxes.every((b) => b.top >= b.bottom));
+  check("trendlines have >= 2 touches", tls.every((t) => t.touches >= 2));
+
+  const price = cs[cs.length - 1].close;
+  const step = cs[1].time - cs[0].time;
+  const flowOf = (direction: "bull" | "bear" | "mixed") =>
+    ({ direction, agreement: 1, label: "l", note: "n" }) as const;
+
+  const bullPath = projectFlow(cs, lines, flowOf("bull"), step);
+  // projectFlow rounds to 7 significant digits, so compare relatively.
+  check("projection starts at current price", Math.abs(bullPath[0].price - price) < Math.abs(price) * 1e-6);
+  check("projection extends into the future", bullPath[bullPath.length - 1].time > cs[cs.length - 1].time);
+  check("bull projection ends above spot", bullPath[bullPath.length - 1].price > price);
+
+  const bearPath = projectFlow(cs, lines, flowOf("bear"), step);
+  check("bear projection ends below spot", bearPath[bearPath.length - 1].price < price);
+}
+
+
+// ---------------------------------------------------------------- vision plumbing
+console.log("== Vision reply parsing");
+{
+  check("plain JSON", (parseJsonReply('{"a":1}') as { a: number }).a === 1);
+  check(
+    "fenced \`\`\`json block",
+    (parseJsonReply('\`\`\`json\\n{"a":2}\\n\`\`\`') as { a: number }).a === 2,
+  );
+  check("bare fence", (parseJsonReply('\`\`\`\\n{"a":3}\\n\`\`\`') as { a: number }).a === 3);
+  check(
+    "JSON wrapped in prose",
+    (parseJsonReply('Here you go:\\n{"a":4}\\nHope that helps.') as { a: number }).a === 4,
+  );
+
+  let threwOnEmpty = false;
+  try { parseJsonReply("   "); } catch { threwOnEmpty = true; }
+  check("empty reply throws", threwOnEmpty);
+
+  let threwOnGarbage = false;
+  try { parseJsonReply("not json at all"); } catch { threwOnGarbage = true; }
+  check("garbage reply throws", threwOnGarbage);
+}
+
+console.log("== Vision result normalising");
+{
+  // A provider that ignores half the schema must not crash the UI.
+  const bare = normalizeAnalysis({});
+  check("missing fields get defaults", bare.direction === "UNCLEAR" && bare.trade.bias === "WAIT");
+  check("missing arrays become empty arrays", Array.isArray(bare.smc) && bare.smc.length === 0);
+  check("missing levels become empty array", Array.isArray(bare.levels) && bare.levels.length === 0);
+
+  check("confidence clamped high", normalizeAnalysis({ direction: "UP", confidence: 99 }).confidence === 10);
+  check("confidence clamped low", normalizeAnalysis({ direction: "UP", confidence: -5 }).confidence === 0);
+  check("non-numeric confidence -> 0", normalizeAnalysis({ direction: "UP", confidence: "high" }).confidence === 0);
+
+  check("lowercase direction accepted", normalizeAnalysis({ direction: "down" }).direction === "DOWN");
+  check("nonsense direction -> UNCLEAR", normalizeAnalysis({ direction: "sideways" }).direction === "UNCLEAR");
+
+  // A confident-sounding number behind an UNCLEAR read would mislead the gauge.
+  check("UNCLEAR caps confidence", normalizeAnalysis({ direction: "UNCLEAR", confidence: 9 }).confidence === 3);
+
+  const withJunk = normalizeAnalysis({
+    direction: "UP", confidence: 7,
+    smc: ["real entry", "", null, 42],
+    levels: [{ label: "PDH", price: 4460 }, {}, { label: "", price: "" }],
+    trade: { bias: "buy", entry: 4430 },
+  });
+  check(
+    "array entries coerced, blanks dropped",
+    withJunk.smc.length === 2 && withJunk.smc[0] === "real entry" && withJunk.smc[1] === "42",
+  );
+  check("numeric level price coerced to string", withJunk.levels[0].price === "4460");
+  check("empty level dropped", withJunk.levels.length === 1);
+  check("lowercase trade bias accepted", withJunk.trade.bias === "BUY");
+  check("numeric entry coerced", withJunk.trade.entry === "4430");
+  check("missing stop gets placeholder", withJunk.trade.stopLoss === "—");
+}
+
+console.log("== Gemini schema conversion");
+{
+  const converted = toGeminiSchema(SCHEMA) as Record<string, unknown>;
+  const asText = JSON.stringify(converted);
+  check("additionalProperties stripped everywhere", !asText.includes("additionalProperties"));
+  check("properties preserved", !!(converted.properties as Record<string, unknown>)?.direction);
+  check("required preserved", Array.isArray(converted.required));
+  check("nested enum preserved", asText.includes('"UNCLEAR"'));
+  check("source schema not mutated", JSON.stringify(SCHEMA).includes("additionalProperties"));
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

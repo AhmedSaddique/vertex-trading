@@ -2,7 +2,7 @@
 import {
   BIAS_TF, CANDLES_BIAS, CANDLES_ENTRY, COOLDOWN_CANDLES, ENTRY_TF, MIN_SCORE, PAIRS, SWING_K,
 } from "./config";
-import { fetchCandles } from "./data";
+import { fetchTimeframes } from "./data";
 import { analyze } from "./signals";
 import { sendSignal } from "./telegram";
 import type { PairAnalysis, PairConfig } from "./types";
@@ -17,15 +17,19 @@ export async function analyzePair(pair: PairConfig): Promise<PairAnalysis> {
     score: 0, reasons: [], signal: null, updatedAt: Date.now(),
   };
   try {
-    const [entry, bias] = await Promise.all([
-      fetchCandles(pair, ENTRY_TF, CANDLES_ENTRY),
-      fetchCandles(pair, BIAS_TF, CANDLES_BIAS),
-    ]);
+    // Anchored fetch: gold candles come from GC=F futures but are shifted onto
+    // XAU/USD spot, so the price shown here matches the chart (see lib/data.ts).
+    const { byTf, livePrice } = await fetchTimeframes(pair, [ENTRY_TF, BIAS_TF], {
+      [ENTRY_TF]: CANDLES_ENTRY,
+      [BIAS_TF]: CANDLES_BIAS,
+    });
+    const entry = byTf[ENTRY_TF] ?? [];
+    const bias = byTf[BIAS_TF] ?? [];
     const res = analyze(pair.name, entry, bias, MIN_SCORE, SWING_K);
     if (!res) return { ...base, error: "not enough data" };
     return {
       ...base,
-      price: entry[entry.length - 1].close,
+      price: livePrice,
       bias: res.bias,
       biasStrength: res.biasStrength,
       score: res.score,

@@ -1,4 +1,6 @@
-// Confluence signal engine: 4H bias + CRT gate, 15m setups, scored confluence.
+// Confluence signal engine: higher-timeframe bias + CRT gate, entry-timeframe
+// setups, scored confluence. The timeframe labels are parameters so the same
+// engine can drive a 1m read and a 4h read without lying about which is which.
 import { detectCandles } from "./candles";
 import { detectCrt } from "./crt";
 import { detectDouble } from "./patterns";
@@ -33,14 +35,24 @@ export interface AnalysisResult {
 
 const g = (x: number) => Number(x.toPrecision(6));
 
+export interface AnalyzeOptions {
+  /** Label used in reason text for the entry timeframe, e.g. "5m". */
+  entryTf?: string;
+  /** Label used in reason text for the bias timeframe, e.g. "1h". */
+  biasTf?: string;
+}
+
 export function analyze(
   pair: string,
   entry15: Candle[],
   htf4h: Candle[],
   minScore = 7.5,
   swingK = 2,
+  opts: AnalyzeOptions = {},
 ): AnalysisResult | null {
   if (entry15.length < 60 || htf4h.length < 30) return null;
+  const ETF = opts.entryTf ?? "15m";
+  const HTF = opts.biasTf ?? "4H";
 
   const reasons: string[] = [];
   const price = entry15[entry15.length - 1].close;
@@ -51,14 +63,14 @@ export function analyze(
   const htf = currentBias(htf4h, swingK);
   const bias = htf.bias;
   let score = htf.strength === "strong" ? w.biasStrong : w.biasWeak;
-  reasons.push(`4H bias ${bias.toUpperCase()} (${htf.strength} structure)`);
+  reasons.push(`${HTF} bias ${bias.toUpperCase()} (${htf.strength} structure)`);
 
   // 2) HTF CRT
   let crt = detectCrt(htf4h);
   if (crt && crt.direction === bias) {
     score += w.crt;
     const side = bias === "bull" ? "low" : "high";
-    reasons.push(`4H CRT: swept previous candle ${side}, closed back inside range`);
+    reasons.push(`${HTF} CRT: swept previous candle ${side}, closed back inside range`);
   } else {
     crt = null;
   }
@@ -70,7 +82,7 @@ export function analyze(
   const confirm = [...recentEvents].reverse().find((e) => e.direction === bias) ?? null;
   if (confirm) {
     score += w.structureConfirm;
-    reasons.push(`15m ${confirm.kind} ${bias} (broke ${g(confirm.brokenLevel)})`);
+    reasons.push(`${ETF} ${confirm.kind} ${bias} (broke ${g(confirm.brokenLevel)})`);
   }
 
   // 4) Liquidity sweep
@@ -81,7 +93,7 @@ export function analyze(
       sweep.type === "pool"
         ? `equal ${bias === "bull" ? "lows" : "highs"}`
         : bias === "bull" ? "swing low" : "swing high";
-    reasons.push(`15m liquidity sweep of ${what} at ${g(sweep.level)}`);
+    reasons.push(`${ETF} liquidity sweep of ${what} at ${g(sweep.level)}`);
   } else {
     sweep = null;
   }
